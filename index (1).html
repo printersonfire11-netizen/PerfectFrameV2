@@ -1,0 +1,375 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#000000">
+<title>PerfectFrame AI</title>
+<style>
+:root{box-sizing:border-box;color-scheme:dark;--bg:#000;--fg:#fff;--accent:#ffd34d;--ok:#4ade80;--glass:rgba(0,0,0,.5);
+padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);background:var(--bg)}
+html,body{height:100%;margin:0;overflow:hidden;background:var(--bg);color:var(--fg);font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;-webkit-tap-highlight-color:transparent}
+#stage{position:relative;height:100%;width:100%;overflow:hidden}
+video,canvas#ov{position:absolute;inset:0;width:100%;height:100%}
+video{object-fit:cover;background:#111}
+canvas#ov{pointer-events:none}
+.top{position:absolute;top:10px;left:0;right:0;display:flex;flex-direction:column;align-items:center;gap:8px;padding:0 12px}
+.pill{background:var(--glass);backdrop-filter:blur(6px);border-radius:999px;padding:6px 14px;font-size:13px}
+#instr{font-size:20px;font-weight:600;padding:10px 20px;text-align:center;max-width:90%;border:2px solid transparent}
+#instr.ok{border-color:var(--ok);color:var(--ok)}
+#bar{width:140px;height:5px;border-radius:3px;background:rgba(255,255,255,.25);overflow:hidden}
+#fill{height:100%;width:0;background:var(--accent);transition:width .3s,background .3s}
+.bottom{position:absolute;bottom:14px;left:0;right:0;display:flex;flex-direction:column;gap:12px;align-items:center}
+.row{display:flex;align-items:center;justify-content:space-around;width:100%;max-width:420px;padding:0 16px}
+button{font:inherit;color:var(--fg);border:0;cursor:pointer}
+.chip{background:var(--glass);border-radius:999px;padding:9px 14px;font-size:13px;min-height:40px}
+.chip.on{background:var(--accent);color:#000}
+#shutter{width:76px;height:76px;border-radius:50%;background:#fff;border:5px solid rgba(255,255,255,.45);background-clip:padding-box}
+#shutter:active{transform:scale(.93)}
+#thumb{width:52px;height:52px;border-radius:12px;background:#222 center/cover;border:2px solid rgba(255,255,255,.6)}
+#flip{width:52px;height:52px;border-radius:50%;background:var(--glass);font-size:22px}
+#zoomWrap{display:flex;align-items:center;gap:10px;width:80%;max-width:360px}
+#zoomWrap input{flex:1;accent-color:var(--accent)}
+#zv{font-size:13px;min-width:38px}
+#flash{position:absolute;inset:0;background:#fff;opacity:0;pointer-events:none;transition:opacity .25s}
+.screen{position:absolute;inset:0;background:#000;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;padding:24px;text-align:center;z-index:5}
+.screen h1{margin:0;font-size:28px}
+.screen p{margin:0;max-width:340px;line-height:1.45;color:#ccc;font-size:15px}
+.big{background:var(--accent);color:#000;font-weight:700;font-size:17px;border-radius:999px;padding:14px 32px}
+#viewer img{max-width:92%;max-height:68%;border-radius:10px}
+.hide{display:none!important}
+</style>
+</head>
+<body>
+<div id="stage">
+  <video id="v" playsinline muted autoplay></video>
+  <canvas id="ov"></canvas>
+  <div id="flash"></div>
+  <div class="top">
+    <div class="pill" id="status">Starting…</div>
+    <div class="pill" id="instr">Point at a scene</div>
+    <div id="bar"><div id="fill"></div></div>
+  </div>
+  <div class="bottom">
+    <div id="zoomWrap" class="hide"><span id="zv">1.0×</span><input id="zoom" type="range" min="1" max="1" step="0.1" value="1" aria-label="Zoom"></div>
+    <div class="row">
+      <button class="chip on" id="gBtn">Guides</button>
+      <button class="chip" id="aBtn">Auto-zoom</button>
+      <button class="chip on" id="cBtn">Crop</button>
+      <button class="chip hide" id="tBtn">Flash</button>
+    </div>
+    <div class="row">
+      <button id="thumb" aria-label="Last photo"></button>
+      <button id="shutter" aria-label="Take photo"></button>
+      <button id="flip" aria-label="Switch camera">⟲</button>
+    </div>
+  </div>
+
+  <div class="screen" id="start">
+    <h1>PerfectFrame AI</h1>
+    <p>Point your camera at anything. Get guidance on how to frame it. Move into position. Take the shot.</p>
+    <button class="big" id="go">Start camera</button>
+    <p id="err" style="color:#ff8a8a"></p>
+    <p style="font-size:13px">Everything is analysed on your phone. No photos are uploaded.</p>
+  </div>
+
+  <div class="screen hide" id="viewer">
+    <img id="vimg" alt="Captured photo">
+    <p>Tap Save, or press and hold the photo to save it to your gallery.</p>
+    <div class="row"><button class="big" id="save">Save</button><button class="chip" id="close">Close</button></div>
+  </div>
+</div>
+
+<script>
+(function(){
+"use strict";
+var $=function(i){return document.getElementById(i)};
+var video=$("v"),ov=$("ov"),ctx=ov.getContext("2d");
+var stream=null,track=null,caps={},facing="environment",zoomVal=1,guides=true,auto=false,torchOn=false;
+var roll=null,lastBlob=null,lastUrl=null,timer=null;
+var S={cx:.5,cy:.5,hz:null,area:0,detail:0,scene:"Scene",ok:false};
+var D={cx:.5,cy:.5,hz:null};           // smoothed values drawn on screen
+var T={tx:null,ty:null,hz:null,show:false}; // current target
+var pend="",pendN=0,shown={msg:"Point at a scene",kind:"idle"},err=1;
+var work=document.createElement("canvas"),wctx=work.getContext("2d",{willReadFrequently:true});
+
+function setStatus(t){$("status").textContent=t}
+function setInstr(m,ok){var e=$("instr");e.textContent=m;e.className="pill"+(ok?" ok":"")}
+
+/* ---------- camera ---------- */
+async function startCamera(){
+  $("err").textContent="";
+  if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){
+    $("err").textContent="Camera isn’t available here. Open this page in Chrome over https.";return false}
+  stopCamera();
+  try{
+    stream=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:{ideal:facing},width:{ideal:1920},height:{ideal:1080}}});
+  }catch(e){
+    var n=e&&e.name;
+    $("err").textContent=(n==="NotAllowedError"||n==="SecurityError")
+      ?"Camera permission was blocked. Allow camera for this site (or open the link directly in Chrome), then tap Start again."
+      :"Couldn’t start the camera ("+(n||"error")+").";
+    return false}
+  video.srcObject=stream;
+  try{await video.play()}catch(e){}
+  track=stream.getVideoTracks()[0];
+  caps=(track.getCapabilities&&track.getCapabilities())||{};
+  zoomVal=1;torchOn=false;
+  var zw=$("zoomWrap"),z=$("zoom");
+  if(caps.zoom&&caps.zoom.max>caps.zoom.min){
+    z.min=caps.zoom.min;z.max=Math.min(caps.zoom.max,10);z.step=caps.zoom.step||0.1;
+    zoomVal=Math.max(caps.zoom.min,1);z.value=zoomVal;zw.classList.remove("hide");$("zv").textContent=zoomVal.toFixed(1)+"×";
+    applyZoom(zoomVal);
+  }else{zw.classList.add("hide")}
+  $("tBtn").classList.toggle("hide",!caps.torch);$("tBtn").classList.remove("on");
+  $("aBtn").classList.toggle("hide",!(caps.zoom&&caps.zoom.max>caps.zoom.min));
+  $("start").classList.add("hide");
+  setStatus("Analysing…");
+  if(timer)clearInterval(timer);
+  timer=setInterval(analyse,200);
+  return true;
+}
+function stopCamera(){
+  if(timer){clearInterval(timer);timer=null}
+  if(stream){stream.getTracks().forEach(function(t){t.stop()});stream=null}
+}
+function applyZoom(v){
+  if(!track||!caps.zoom)return;
+  v=Math.min(Math.max(v,caps.zoom.min),Math.min(caps.zoom.max,10));
+  zoomVal=v;$("zoom").value=v;$("zv").textContent=v.toFixed(1)+"×";
+  track.applyConstraints({advanced:[{zoom:v}]}).catch(function(){});
+}
+
+/* ---------- orientation ---------- */
+function onOrient(e){
+  if(e.beta==null||e.gamma==null)return;
+  var a=(screen.orientation&&screen.orientation.angle)||window.orientation||0;
+  if(a%180===0){roll=(e.beta>30&&e.beta<150)?e.gamma:null}
+  else{roll=(Math.abs(e.gamma)>30)?e.beta:null}
+  if(roll!=null&&Math.abs(roll)>90)roll=null;
+}
+window.addEventListener("deviceorientation",onOrient);
+
+/* ---------- scene analysis (on-device heuristics) ---------- */
+function analyse(){
+  var vw=video.videoWidth,vh=video.videoHeight;
+  if(!vw||!vh||video.readyState<2)return;
+  var w=64,h=Math.max(16,Math.round(64*vh/vw));
+  work.width=w;work.height=h;
+  wctx.drawImage(video,0,0,w,h);
+  var px=wctx.getImageData(0,0,w,h).data,N=w*h,L=new Float32Array(N),i,x,y;
+  for(i=0;i<N;i++){L[i]=.299*px[i*4]+.587*px[i*4+1]+.114*px[i*4+2]}
+  var G=new Float32Array(N),gs=0;
+  for(y=1;y<h-1;y++)for(x=1;x<w-1;x++){
+    var k=y*w+x,g=Math.abs(L[k+1]-L[k-1])+Math.abs(L[k+w]-L[k-w]);G[k]=g;gs+=g}
+  var mean=gs/((w-2)*(h-2)),thr=mean*1.6+4,sw=0,sx=0,sy=0,cnt=0;
+  for(y=1;y<h-1;y++)for(x=1;x<w-1;x++){
+    var gg=G[y*w+x];if(gg>thr){var wt=gg-thr;sw+=wt;sx+=wt*x;sy+=wt*y;cnt++}}
+  var area=cnt/((w-2)*(h-2));
+  S.detail=mean;S.area=area;S.ok=mean>3&&sw>0;
+  if(S.ok){
+    var nx=sx/sw/(w-1),ny=sy/sw/(h-1);
+    S.cx=S.cx+(nx-S.cx)*.4;S.cy=S.cy+(ny-S.cy)*.4;
+  }
+  // horizon: strongest brightness step between row bands, with a smooth band above it
+  var rm=new Float32Array(h),rg=new Float32Array(h);
+  for(y=0;y<h;y++){var s=0,sg=0;for(x=0;x<w;x++){s+=L[y*w+x];sg+=G[y*w+x]}rm[y]=s/w;rg[y]=sg/w}
+  var best=0,by=-1,b=4,y0=Math.round(h*.12),y1=Math.round(h*.88);
+  for(y=y0;y<y1;y++){
+    if(y-b<0||y+b>=h)continue;
+    var up=0,dn=0;for(var j=1;j<=b;j++){up+=rm[y-j];dn+=rm[y+j]}
+    var d=Math.abs(up-dn)/b;
+    if(d>best){best=d;by=y}
+  }
+  var hz=null;
+  if(by>0&&best>22){
+    var ga=0;for(var m=Math.max(1,by-8);m<by-1;m++)ga+=rg[m];ga/=Math.max(1,by-2-Math.max(1,by-8)+1);
+    if(ga<Math.max(6,mean*1.2))hz=by/(h-1);
+  }
+  S.hz=(hz==null)?null:(S.hz==null?hz:S.hz+(hz-S.hz)*.4);
+  if(hz==null&&S.hz!=null){S.hzMiss=(S.hzMiss||0)+1;if(S.hzMiss>4){S.hz=null;S.hzMiss=0}}else S.hzMiss=0;
+  // scene label from the top quarter colour
+  var r=0,gc=0,bl=0,c=0,top=Math.max(2,Math.round(h*.25));
+  for(i=0;i<top*w;i++){r+=px[i*4];gc+=px[i*4+1];bl+=px[i*4+2];c++}
+  r/=c;gc/=c;bl/=c;var lum=.299*r+.587*gc+.114*bl;
+  var skyTop=(bl>r+8&&bl>=gc-4&&lum>80)||(lum>170&&mean<8);
+  S.scene=S.hz!=null?(skyTop?"Landscape / sky":"Landscape"):(skyTop?"Sky":(S.ok?"Scene":"Low detail"));
+  var cmr=0,cmg=0,cmb=0,GS=new Float32Array(N),gm=0;
+  for(i=0;i<N;i++){cmr+=px[i*4];cmg+=px[i*4+1];cmb+=px[i*4+2]}
+  cmr/=N;cmg/=N;cmb/=N;
+  for(y=1;y<h-1;y++)for(x=1;x<w-1;x++){var kk=y*w+x,v2=G[kk]+.2*(Math.abs(px[kk*4]-cmr)+Math.abs(px[kk*4+1]-cmg)+Math.abs(px[kk*4+2]-cmb));GS[kk]=v2;gm+=v2}
+  S.G=GS;S.thr=gm/((w-2)*(h-2))*1.6+4;S.gw=w;S.gh=h;
+  decide();
+}
+
+var cropOn=true;
+/* Searches many candidate rectangles (same aspect as the camera frame) and scores each */
+function search(){
+  var w=S.gw,h=S.gh,G=S.G,thr=S.thr,x,y,W1=w+1,p;
+  var A=new Float32Array(W1*(h+1)),BX=new Float32Array(W1*(h+1)),BY=new Float32Array(W1*(h+1));
+  for(y=0;y<h;y++){var ra=0,rx=0,ry=0;
+    for(x=0;x<w;x++){
+      var v=(x<1||y<1||x>w-2||y>h-2)?0:G[y*w+x]-thr;if(v<0)v=0;
+      ra+=v;rx+=v*x;ry+=v*y;
+      var k=(y+1)*W1+x+1,u=y*W1+x+1;
+      A[k]=A[u]+ra;BX[k]=BX[u]+rx;BY[k]=BY[u]+ry}}
+  var tot=A[h*W1+w];if(tot<=0)return null;
+  function bx(M,x0,y0,x1,y1){return M[y1*W1+x1]-M[y0*W1+x1]-M[y1*W1+x0]+M[y0*W1+x0]}
+  function pos(n,st){var a=[],t;for(t=0;t<=n;t+=st)a.push(t);if(a[a.length-1]!==n)a.push(n);return a}
+  var P=[[1/3,1/3,1],[2/3,1/3,1],[1/3,2/3,1],[2/3,2/3,1],[.5,.5,.85]];
+  var scales=[1,.9,.8,.7,.6,.5,.42],best=null,full=0,si,xi,yi;
+  var step=Math.max(2,Math.round(w*.04));
+  for(si=0;si<scales.length;si++){
+    var s=scales[si],rw=Math.round(w*s),rh=Math.round(h*s),xs=pos(w-rw,step),ys=pos(h-rh,step);
+    for(yi=0;yi<ys.length;yi++)for(xi=0;xi<xs.length;xi++){
+      var x0=xs[xi],y0=ys[yi],m=bx(A,x0,y0,x0+rw,y0+rh);
+      if(m<=0)continue;
+      var cx=(bx(BX,x0,y0,x0+rw,y0+rh)/m-x0)/rw,cy=(bx(BY,x0,y0,x0+rw,y0+rh)/m-y0)/rh,cover=m/tot;
+      var ts=0;
+      for(p=0;p<5;p++){var ddx=cx-P[p][0],ddy=cy-P[p][1],t=Math.exp(-(ddx*ddx+ddy*ddy)/.025)*P[p][2];if(t>ts)ts=t}
+      var ix=Math.round(rw*.07),iy=Math.round(rh*.07);
+      var mi=bx(A,x0+ix,y0+iy,x0+rw-ix,y0+rh-iy),cs=1-Math.min(1,((m-mi)/m)*2.2);
+      var dn=Math.max(0,Math.min(1,(cover/(s*s)-.9)/1.6)),hs=.6;
+      if(S.hz!=null){
+        var hy=S.hz*(h-1);
+        if(hy>y0+rh*.1&&hy<y0+rh*.9){var hr=(hy-y0)/rh,a1=hr-1/3,a2=hr-2/3;hs=Math.max(Math.exp(-a1*a1/.01),Math.exp(-a2*a2/.01))}
+        else hs=.5}
+      var sc=(.30*ts+.25*cover+.20*dn+.15*cs+.10*hs)*(s<.6?.85:(s===1?.97:1));
+      if(s===1)full=sc;
+      if(!best||sc>best.score)best={x:x0/w,y:y0/h,w:rw/w,h:rh/h,s:s,score:sc}
+    }
+  }
+  if(!best)return null;
+  best.full=full;best.gain=best.score-full;return best;
+}
+function decide(){
+  var rec,best=S.ok?search():null;
+  if(!best){
+    T.r=null;rec={kind:"none",msg:"Not enough detail to guide — shoot freely",e:1};setStatus(S.scene);
+  }else{
+    var sc=best.score;
+    if(best.gain<.025){best={x:0,y:0,w:1,h:1,s:1,score:best.full,gain:0};sc=best.score}
+    T.r=best;
+    var dx=best.x+best.w/2-.5,dy=best.y+best.h/2-.5,zmax=caps.zoom?Math.min(caps.zoom.max,4):1;
+    if(roll!=null&&Math.abs(roll)>5)rec={kind:"level",msg:"Level your phone",e:Math.min(1,Math.abs(roll)/25)};
+    else if(best.s<.93&&Math.abs(dx)>.06)rec={kind:"pan",msg:dx>0?"Pan right a little":"Pan left a little",e:Math.min(1,Math.abs(dx)*4)};
+    else if(best.s<.93&&Math.abs(dy)>.06)rec={kind:"tilt",msg:dy>0?"Tilt down slightly":"Tilt up slightly",e:Math.min(1,Math.abs(dy)*4)};
+    else if(best.s<.93&&(!caps.zoom||zoomVal<zmax-.2))rec={kind:"zoom",msg:caps.zoom?"Zoom in to fill the frame":"Move a little closer",e:Math.min(1,1-best.s)};
+    else rec={kind:"ok",msg:"Perfect — capture your shot",e:0};
+    setStatus(S.scene+" · frame "+Math.round(Math.min(1,best.full!=null?best.full:sc)*100)+"% → box "+Math.round(Math.min(1,sc)*100)+"%");
+  }
+  var key=rec.kind+"|"+rec.msg;
+  if(key===pend){pendN++}else{pend=key;pendN=1}
+  var need=rec.kind==="ok"?4:3;
+  if(pendN>=need&&(shown.msg!==rec.msg)){shown=rec}
+  err=err+(rec.e-err)*.4;
+  var isOk=shown.kind==="ok";
+  setInstr(isOk?"Perfect — capture your shot":(shown.e<.2&&shown.kind!=="none"&&shown.kind!=="idle"?"You’re almost aligned — "+shown.msg.toLowerCase():shown.msg),isOk);
+  var f=$("fill");f.style.width=Math.round((1-Math.min(1,err))*100)+"%";f.style.background=isOk?"var(--ok)":"var(--accent)";
+  if(auto&&rec.kind==="zoom"&&shown.kind==="zoom"&&pendN>=need&&T.r)applyZoom(zoomVal*Math.min(1.1,1/T.r.s));
+}
+
+/* ---------- overlay ---------- */
+function resize(){
+  var d=window.devicePixelRatio||1,W=ov.clientWidth,H=ov.clientHeight;
+  ov.width=Math.round(W*d);ov.height=Math.round(H*d);ctx.setTransform(d,0,0,d,0,0);
+}
+function map(nx,ny){
+  var vw=video.videoWidth||1,vh=video.videoHeight||1,W=ov.clientWidth,H=ov.clientHeight;
+  var s=Math.max(W/vw,H/vh),ox=(W-vw*s)/2,oy=(H-vh*s)/2;
+  return [ox+nx*vw*s,oy+ny*vh*s];
+}
+function draw(){
+  requestAnimationFrame(draw);
+  var W=ov.clientWidth,H=ov.clientHeight;ctx.clearRect(0,0,W,H);
+  if(!stream)return;
+  if(T.r){
+    if(!D.r||Math.abs(D.r.w-T.r.w)>.35)D.r={x:T.r.x,y:T.r.y,w:T.r.w,h:T.r.h};
+    else{D.r.x+=(T.r.x-D.r.x)*.2;D.r.y+=(T.r.y-D.r.y)*.2;D.r.w+=(T.r.w-D.r.w)*.2;D.r.h+=(T.r.h-D.r.h)*.2}
+  }else D.r=null;
+  if(S.hz==null)D.hz=null;else D.hz=(D.hz==null)?S.hz:D.hz+(S.hz-D.hz)*.25;
+  if(!guides)return;
+  var ok=shown.kind==="ok",col=ok?"#4ade80":"#ffd34d";
+  if(D.r){
+    var p0=map(D.r.x,D.r.y),p1=map(D.r.x+D.r.w,D.r.y+D.r.h);
+    var x0=Math.max(3,p0[0]),y0=Math.max(3,p0[1]),x1=Math.min(W-3,p1[0]),y1=Math.min(H-3,p1[1]),rw=x1-x0,rh=y1-y0;
+    ctx.fillStyle="rgba(0,0,0,.45)";
+    ctx.beginPath();ctx.rect(0,0,W,H);ctx.rect(x0,y0,rw,rh);ctx.fill("evenodd");
+    ctx.lineWidth=1;ctx.strokeStyle="rgba(255,255,255,.4)";ctx.beginPath();
+    for(var i=1;i<3;i++){ctx.moveTo(x0+rw*i/3,y0);ctx.lineTo(x0+rw*i/3,y1);ctx.moveTo(x0,y0+rh*i/3);ctx.lineTo(x1,y0+rh*i/3)}
+    ctx.stroke();
+    ctx.strokeStyle=col;ctx.lineWidth=2;ctx.strokeRect(x0,y0,rw,rh);
+    var L=Math.min(26,rw/4,rh/4);ctx.lineWidth=5;ctx.lineCap="round";ctx.beginPath();
+    ctx.moveTo(x0,y0+L);ctx.lineTo(x0,y0);ctx.lineTo(x0+L,y0);
+    ctx.moveTo(x1-L,y0);ctx.lineTo(x1,y0);ctx.lineTo(x1,y0+L);
+    ctx.moveTo(x0,y1-L);ctx.lineTo(x0,y1);ctx.lineTo(x0+L,y1);
+    ctx.moveTo(x1-L,y1);ctx.lineTo(x1,y1);ctx.lineTo(x1,y1-L);ctx.stroke();
+    ctx.font="bold 12px system-ui,sans-serif";var lab=T.r&&T.r.s>=.99?"GREAT FRAMING ✓":(ok?"BEST SHOT ✓":"BEST SHOT"),tw=ctx.measureText(lab).width+14;
+    ctx.fillStyle=col;ctx.fillRect(x0+8,y0+8,tw,22);ctx.fillStyle="#000";ctx.fillText(lab,x0+15,y0+24);
+  }
+  if(D.r&&T.r&&(Math.abs(D.r.x-T.r.x)+Math.abs(D.r.y-T.r.y)+Math.abs(D.r.w-T.r.w))>.03){
+    var tt=(Date.now()%1000)/1000;ctx.strokeStyle="rgba(255,211,77,.7)";ctx.lineWidth=2;
+    ctx.beginPath();ctx.moveTo(0,H*tt);ctx.lineTo(W,H*tt);ctx.stroke();
+  }
+  if(D.hz!=null){
+    var hp=map(0,D.hz)[1];
+    ctx.setLineDash([8,6]);ctx.strokeStyle="rgba(255,255,255,.7)";ctx.lineWidth=2;
+    ctx.beginPath();ctx.moveTo(0,hp);ctx.lineTo(W,hp);ctx.stroke();ctx.setLineDash([]);
+  }
+}
+
+/* ---------- capture ---------- */
+function capture(){
+  if(!stream||!video.videoWidth)return;
+  var vw=video.videoWidth,vh=video.videoHeight,r=(cropOn&&D.r)?D.r:{x:0,y:0,w:1,h:1};
+  var sx=Math.max(0,Math.round(r.x*vw)),sy=Math.max(0,Math.round(r.y*vh));
+  var sw=Math.max(16,Math.min(vw-sx,Math.round(r.w*vw))),sh=Math.max(16,Math.min(vh-sy,Math.round(r.h*vh)));
+  var c=document.createElement("canvas");c.width=sw;c.height=sh;
+  c.getContext("2d").drawImage(video,sx,sy,sw,sh,0,0,sw,sh);
+  var f=$("flash");f.style.transition="none";f.style.opacity=".8";
+  requestAnimationFrame(function(){f.style.transition="opacity .25s";f.style.opacity="0"});
+  var cropped=r.w<.98;
+  c.toBlob(function(blob){
+    if(!blob){setInstr("Couldn’t capture — try again",false);return}
+    lastBlob=blob;if(lastUrl)URL.revokeObjectURL(lastUrl);lastUrl=URL.createObjectURL(blob);
+    $("thumb").style.backgroundImage="url("+lastUrl+")";
+    setInstr(cropped?"Captured — cropped to best frame ✓":"Photo captured ✓",true);
+    if(navigator.vibrate)try{navigator.vibrate(30)}catch(e){}
+  },"image/jpeg",.95);
+}
+function fname(){var d=new Date(),p=function(n){return String(n).padStart(2,"0")};
+  return "PerfectFrame_"+d.getFullYear()+p(d.getMonth()+1)+p(d.getDate())+"_"+p(d.getHours())+p(d.getMinutes())+p(d.getSeconds())+".jpg"}
+async function save(){
+  if(!lastBlob)return;
+  var file=new File([lastBlob],fname(),{type:"image/jpeg"});
+  try{
+    if(navigator.canShare&&navigator.canShare({files:[file]})){await navigator.share({files:[file],title:"PerfectFrame photo"});return}
+  }catch(e){if(e&&e.name==="AbortError")return}
+  try{var a=document.createElement("a");a.href=lastUrl;a.download=file.name;document.body.appendChild(a);a.click();a.remove()}catch(e){}
+}
+
+/* ---------- wiring ---------- */
+$("go").addEventListener("click",function(){startCamera()});
+$("shutter").addEventListener("click",capture);
+$("flip").addEventListener("click",function(){facing=facing==="environment"?"user":"environment";startCamera()});
+$("zoom").addEventListener("input",function(e){applyZoom(parseFloat(e.target.value))});
+$("gBtn").addEventListener("click",function(e){guides=!guides;e.currentTarget.classList.toggle("on",guides)});
+$("aBtn").addEventListener("click",function(e){auto=!auto;e.currentTarget.classList.toggle("on",auto)});
+$("cBtn").addEventListener("click",function(e){cropOn=!cropOn;e.currentTarget.classList.toggle("on",cropOn)});
+$("tBtn").addEventListener("click",function(e){
+  torchOn=!torchOn;e.currentTarget.classList.toggle("on",torchOn);
+  track.applyConstraints({advanced:[{torch:torchOn}]}).catch(function(){torchOn=false;e.currentTarget.classList.remove("on")});
+});
+$("thumb").addEventListener("click",function(){if(!lastUrl)return;$("vimg").src=lastUrl;$("viewer").classList.remove("hide")});
+$("close").addEventListener("click",function(){$("viewer").classList.add("hide")});
+$("save").addEventListener("click",save);
+window.addEventListener("resize",resize);
+document.addEventListener("visibilitychange",function(){
+  if(document.hidden){if(timer){clearInterval(timer);timer=null}}
+  else if(stream&&!timer){timer=setInterval(analyse,200)}
+});
+resize();draw();
+})();
+</script>
+</body>
+</html>
